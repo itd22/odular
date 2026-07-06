@@ -11,10 +11,10 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(Qt5 REQUIRED COMPONENTS Widgets Xml)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Xml)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(POPPLER_QT5 REQUIRED IMPORTED_TARGET poppler-qt5)
+pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
 
 add_executable(odular
     src/main.cpp
@@ -26,9 +26,9 @@ add_executable(odular
 target_include_directories(odular PRIVATE src)
 
 target_link_libraries(odular PRIVATE
-    Qt5::Widgets
-    Qt5::Xml
-    PkgConfig::POPPLER_QT5
+    Qt6::Widgets
+    Qt6::Xml
+    PkgConfig::POPPLER_QT6
 )
 
 install(TARGETS odular RUNTIME DESTINATION bin)

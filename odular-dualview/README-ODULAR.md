@@ -32,7 +32,8 @@ odular-dualview/
 ## Dependencies
 
 ```
-sudo apt install cmake qtbase5-dev libqt5xml5 libpoppler-qt5-dev pkg-config
+sudo apt install cmake qtbase6-dev libqt
+5xml5 libpoppler-qt6-dev pkg-config
 ```
 
 ## Build (produces the `odular` executable)

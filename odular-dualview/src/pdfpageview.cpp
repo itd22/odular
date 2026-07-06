@@ -7,7 +7,7 @@
 #include <QImage>
 #include <QPixmap>
 
-#include <poppler-qt5.h>
+#include <poppler-qt6.h>
 
 namespace {
 constexpr qreal kBaseDpi = 72.0;

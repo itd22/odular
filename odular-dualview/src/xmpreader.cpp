@@ -1,7 +1,7 @@
 #include "xmpreader.h"
 
 #include <QXmlStreamReader>
-#include <poppler-qt5.h>
+#include <poppler-qt6.h>
 
 namespace XmpReader
 {
