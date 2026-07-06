@@ -232,9 +232,7 @@ sudo apt install \
 ### Configure build
 
 ```bash
-cmake -B build \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DBUILD_TESTING=OFF
+cmake -B build   -DCMAKE_BUILD_TYPE=Debug   -DBUILD_TESTING=OFF
 ```
 
 ### Compile
