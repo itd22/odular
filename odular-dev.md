@@ -269,3 +269,233 @@ Only open the secondary document once the first page of the primary has
 rendered, e.g. by hooking `DualDocumentController::loadLinked()` off
 `Document`'s page-ready signal rather than calling it immediately after
 `openDocument()` returns.
+
+## 5. Minimal-change build strategy for odular
+
+The goal: **never edit okular's own files in place**. All odular-specific
+code lives in a single new subtree, okular's own CMake/build path stays
+byte-for-byte identical when the overlay isn't requested, and there's a
+concrete way to prove that.
+
+### 5.1 Design
+
+```
+<okular-dir>/
+├── CMakeLists.txt          # okular's own root — gets exactly ONE new,
+│                           # default-OFF block added (see 5.2)
+├── core/ generators/ part/ ...   # untouched okular sources
+└── odular/                 # NEW — everything odular-specific lives here
+    ├── overlay.cmake       # copies files below onto the tree, gated
+    │                       # behind BUILD_ODULAR_OVERLAY
+    ├── manifest.txt        # list of repo-relative paths this overlay
+    │                       # replaces or adds — used both by overlay.cmake
+    │                       # and by the validation script in 5.4
+    ├── core/document_p.h              # replaces core/document_p.h
+    ├── core/document.cpp              # replaces core/document.cpp
+    ├── generators/poppler/generator_pdf.h
+    ├── generators/poppler/generator_pdf.cpp
+    ├── part/part.cpp
+    ├── part/pageview.h
+    ├── part/pageview.cpp
+    ├── part/dualdocumentcontroller.h  # new file, not a replacement
+    └── part/dualdocumentcontroller.cpp
+```
+
+`odular/` mirrors the paths of the okular files it changes or adds, so
+`manifest.txt` is just:
+
+```
+core/document_p.h
+core/document.cpp
+generators/poppler/generator_pdf.h
+generators/poppler/generator_pdf.cpp
+part/part.cpp
+part/pageview.h
+part/pageview.cpp
+part/dualdocumentcontroller.h
+part/dualdocumentcontroller.cpp
+```
+
+`odular/overlay.cmake`:
+
+```cmake
+# odular/overlay.cmake — only included when BUILD_ODULAR_OVERLAY is ON
+file(STRINGS "${CMAKE_SOURCE_DIR}/odular/manifest.txt" _odular_files)
+
+foreach(_rel ${_odular_files})
+    set(_src "${CMAKE_SOURCE_DIR}/odular/${_rel}")
+    set(_dst "${CMAKE_SOURCE_DIR}/${_rel}")
+    if(EXISTS ${_src})
+        message(STATUS "odular overlay: ${_rel}")
+        configure_file(${_src} ${_dst} COPYONLY)
+    else()
+        message(FATAL_ERROR "odular overlay: missing ${_src} listed in manifest.txt")
+    endif()
+endforeach()
+
+# part/dualdocumentcontroller.{h,cpp} are new sources, not replacements —
+# they need to be added to okularpart's source list explicitly.
+# In part/CMakeLists.txt this is one added line, guarded the same way:
+#   if(BUILD_ODULAR_OVERLAY)
+#       target_sources(okularpart PRIVATE dualdocumentcontroller.cpp)
+#   endif()
+```
+
+The **only** edit okular's own root `CMakeLists.txt` needs is this, added
+once, near the top:
+
+```cmake
+option(BUILD_ODULAR_OVERLAY "Apply odular/ source overlay (dual-view build)" OFF)
+if(BUILD_ODULAR_OVERLAY)
+    include(odular/overlay.cmake)
+endif()
+```
+
+Default is `OFF`, so a normal `cmake -B build` behaves exactly as upstream
+okular always has. `configure_file(... COPYONLY)` runs at CMake-configure
+time and re-runs automatically (via CMake's own dependency tracking) if a
+file under `odular/` changes, so there's no separate "copy step" to remember.
+
+### 5.2 Build sequence
+
+```bash
+# Stage 1 — build stock okular, completely unmodified, as a baseline.
+cmake -B build-okular -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-okular -j"$(nproc)"
+
+# Stage 2 — build odular: same tree, overlay applied on top.
+cmake -B build-odular -DCMAKE_BUILD_TYPE=Debug -DBUILD_ODULAR_OVERLAY=ON
+cmake --build build-odular -j"$(nproc)"
+```
+
+Both builds configure from the *same* source directory. Stage 1 never
+touches `odular/`, so it is exactly the upstream okular build chain. Stage 2
+copies the files in `manifest.txt` over their originals before compiling —
+this is destructive to the working tree (the copied-over files are now
+modified on disk), so run Stage 1 first, or use a separate `git worktree` /
+clone per stage if you want to keep both buildable side-by-side without
+re-checking-out files in between:
+
+```bash
+git worktree add ../odular-stock odular
+git worktree add ../odular-overlay odular
+# build stock in ../odular-stock, overlay build in ../odular-overlay
+```
+
+### 5.3 Validating okular's own build chain is unchanged
+
+Confirm the root `CMakeLists.txt` diff against upstream is exactly the
+5-line `option()`/`if()` block above and nothing else:
+
+```bash
+git diff upstream/master -- CMakeLists.txt
+```
+
+Confirm a default configure+build (no `-DBUILD_ODULAR_OVERLAY`) produces an
+identical object list and identical binary hash to a build from a checkout
+that has no `odular/` directory at all:
+
+```bash
+cmake -B build-baseline -DCMAKE_BUILD_TYPE=Debug   # BUILD_ODULAR_OVERLAY defaults OFF
+cmake --build build-baseline -j"$(nproc)"
+sha256sum build-baseline/bin/okular build-okular/bin/okular   # should match
+```
+
+### 5.4 Validating the odular build is "original okular files + changes"
+
+```bash
+# Every file the overlay touched should now match odular/, and every
+# other file in the tree should still match upstream.
+while read -r rel; do
+    diff -q "odular/${rel}" "${rel}" || echo "MISMATCH: ${rel}"
+done < odular/manifest.txt
+
+# And confirm nothing *outside* the manifest changed:
+git status --porcelain | grep -v -F -f <(sed 's/^/ M /' odular/manifest.txt)
+# (should print nothing)
+```
+
+If both checks come back clean, the odular build is provably "upstream
+okular, plus exactly the files listed in `manifest.txt`, and nothing else."
+
+### 5.5 Dropping translations (English-only interface) without touching source
+
+`i18n()` / `i18nc()` calls stay in the code as-is — ripping them out of every
+call site across the tree would violate the minimize-changes goal, and isn't
+necessary: KI18n's `i18n()` already falls back to the untranslated source
+string (which is English) whenever no translation catalog is loaded. So the
+practical way to get an English-only interface without editing any `.cpp`
+file is to **stop building/installing the translation catalogs**, which is
+two lines in the same overlay-gated block in the root `CMakeLists.txt`:
+
+```cmake
+if(NOT BUILD_ODULAR_OVERLAY)
+    ki18n_install(po)
+    if(KF6DocTools_FOUND)
+        kdoctools_install(po)
+    endif()
+endif()
+```
+
+`find_package(KF6 ... COMPONENTS ... I18n ...)` still has to stay — the
+`I18n` component is a required, non-optional entry in okular's own
+`find_package(KF6 ...)` call, and `i18n()` itself is a compile-time macro
+from that library, not something layered on top. Removing the component
+would break the build; skipping catalog installation just means there's
+nothing for it to translate *to* at runtime.
+
+### 5.6 Script: strip unneeded `.po` catalogs
+
+The `po/` directory ships ~1,069 `.po` files across 83 locale subdirectories.
+If odular never installs them (5.5), they cost nothing at build time, but
+if you also want them gone from the working tree/repo entirely:
+
+```bash
+#!/usr/bin/env bash
+# odular/scripts/strip-translations.sh
+# Deletes every po/<locale> directory, keeping only the source (English)
+# strings baked into the .cpp/.ui/.rc files. Safe to re-run; it's a no-op
+# once already stripped.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PO_DIR="${REPO_ROOT}/po"
+
+# Locales to keep, if any (space-separated, e.g. KEEP_LOCALES="en_GB").
+KEEP_LOCALES="${KEEP_LOCALES:-}"
+
+if [[ ! -d "${PO_DIR}" ]]; then
+    echo "No po/ directory found at ${PO_DIR}, nothing to do."
+    exit 0
+fi
+
+shopt -s nullglob
+removed=0
+for locale_dir in "${PO_DIR}"/*/; do
+    locale="$(basename "${locale_dir}")"
+    keep=false
+    for k in ${KEEP_LOCALES}; do
+        [[ "${locale}" == "${k}" ]] && keep=true
+    done
+    if [[ "${keep}" == false ]]; then
+        rm -rf -- "${locale_dir}"
+        removed=$((removed + 1))
+    fi
+done
+
+echo "Removed ${removed} locale director$( [[ ${removed} -eq 1 ]] && echo y || echo ies ) from po/."
+[[ -n "${KEEP_LOCALES}" ]] && echo "Kept: ${KEEP_LOCALES}"
+```
+
+Usage:
+
+```bash
+chmod +x odular/scripts/strip-translations.sh
+./odular/scripts/strip-translations.sh           # deletes all 83 locale dirs
+KEEP_LOCALES="en_GB" ./odular/scripts/strip-translations.sh   # keep one
+```
+
+Since no locale directory contains "en" (US English is the untranslated
+source string, not a `.po` file), the default run with no `KEEP_LOCALES`
+already leaves the interface English-only — there's nothing to "keep,"
+only locales to remove.
